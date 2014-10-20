@@ -1,0 +1,187 @@
+#!/bin/sh
+#
+# Script to control virtualbox machines
+#
+# Allows to manage and connect to machines, shortcutting the
+# horrible virtualbox command line interface, and adding an
+# reg-exp based mechanism to save keystrokes when referring to
+# virtual machines.
+#
+
+errormsg=""
+
+die () {
+	msg=${1:-$errormsg}
+	echo "\033[31mvbox: $msg\033[0m" 1>&2
+	exit 1
+}
+
+getport () {
+	port=$(printf "%b" "$1" | sed -ne 's/Forwarding(.)="Rule .,tcp,,\([0-9]*\),,'$2'"/\1/p')
+	test -n "$port" || return 1
+	echo $port
+}
+
+getkey () {
+	printf "%b" "$1" | sed -ne "s/^$2=\"\(.*\)\"/\1/p"
+}
+
+getinfo () {
+	VBoxManage showvminfo "$1" --machinereadable
+}
+
+gethostip () {
+	VBoxManage guestproperty get $1 /VirtualBox/GuestInfo/Net/0/V4/IP | sed -ne 's/Value: \(.*\)/\1/p' 
+}
+
+resolve_uuid () {
+	local count=0
+	for uuid in $(VBoxManage list vms | sed -ne 's/^.*'"$1"'.*\({.*}\).*$/\1/Ip'); do
+		count=$(( $count + 1 ))
+		echo $uuid
+	done
+	test $count -ne 1 && return 1
+	return 0
+}
+
+command="$1"
+regexp="$2"
+case "$command" in
+	list)
+		uuids=$(resolve_uuid "$regexp")
+		printf "\033[1m%30s  %8s  %-s\033[0m\n" Name State OSType
+		for uuid in $uuids
+		do
+			info=$(getinfo $uuid)
+			name=$(getkey "$info" name)
+			state=$(getkey "$info" VMState)
+			os=$(getkey "$info" ostype)
+			printf "%30.30s  %8s  %-s\n"  "$name" "$state" "$os"
+		done
+	;;
+	info)
+		uuid=$(resolve_uuid "$regexp") || die "UUID not found, or more than one found"
+		info=$(getinfo $uuid)
+		fmt='\033[1m%16s\033[0m  %-s\n'
+		printf "$fmt" Name "$(getkey "$info" name)"
+		printf "$fmt" UUID "$(getkey "$info" UUID)"
+		printf "$fmt" State "$(getkey "$info" VMState)"
+		printf "$fmt" OSType "$(getkey "$info" ostype)"
+		if [ "$(getkey "$info" vrde)" = "on" ]
+		then
+			printf "$fmt" "RDP" "On"
+			printf "$fmt" "RDP-port" "$(getkey "$info" vrdeports)"
+		else
+			printf "$fmt" "RDP" "Off"
+		fi
+		if [ "$(getkey "$info" nic1)" = "nat" ]
+		then
+			printf "$fmt" "Network" "NAT"
+			portssh="$(getport "$info" 22)" && printf "$fmt" "SSH-port" "$portssh"
+			portvnc="$(getport "$info" 5900)" && printf "$fmt" "VNC-port" "$portvnc"
+		elif [ "$(getkey "$info" nic1)" = "bridged" ]
+		then
+			printf "$fmt" "Network" "Bridge"
+			ip=$(gethostip $uuid)
+			printf "$fmt" "IP" "$ip"
+		fi
+	;;
+	start)
+		uuid=$(resolve_uuid "$regexp") || die "UUID not found, or more than one found"
+		VBoxManage startvm "$uuid" --type headless 1>/dev/null 2>/dev/null || die "Impossible to start, maybe its already started"
+		echo Starting $(getkey "$(getinfo $uuid)" name)
+	;;
+	stop)
+		uuid=$(resolve_uuid "$regexp") || die "UUID not found, or more than one found"
+		VBoxManage controlvm "$uuid" acpipowerbutton 1>/dev/null 2>/dev/null || die "Impossible to acpi stop, is it running?"
+		echo Acpistopping $(getkey "$(getinfo $uuid)" name)
+	;;
+	kill)
+		uuid=$(resolve_uuid "$regexp") || die "UUID not found, or more than one found"
+		VBoxManage controlvm "$uuid" shutdown 1>/dev/null 2>/dev/null || die "Impossible to shutdown, is it running?"
+		echo Shutdowning $(getkey "$(getinfo $uuid)" name)
+	;;
+	rename)
+		machinename=$3
+		uuid=$(resolve_uuid "$regexp") || die "UUID not found, or more than one found"
+		test -n "$machinename" || die "Provide a new name for the machine"
+		name=$(getkey "$(getinfo $uuid)" name)
+		echo "Renaming $name to $machinename"
+		VBoxManage modifyvm "$uuid" --name "$machinename" 1>/dev/null 2>/dev/null || die "Impossible to rename, is it running?"
+	;;
+	ssh)
+		username=$3
+		uuid=$(resolve_uuid "$regexp") || die "UUID not found, or more than one found"
+		test -n "$username" || die "Provide a username to login in the machine"
+		info=$(getinfo $uuid)
+		nic=$(getkey "$info" nic1)
+		case "$nic" in
+			bridged)
+				port="22"
+				host=$(gethostip $uuid)
+				;;
+			nat)
+				port=$(getport "$info" 22) || die "SSH port mapping not found"
+				host="localhost"
+				;;
+			*)
+				die "Unknown network interface, or not found"
+				;;
+		esac
+		echo Connecting to $(getkey "$info" name) via SSH
+		ssh -p "$port" "$username@$host"
+	;;
+	rdp)
+		uuid=$(resolve_uuid "$regexp") || die "UUID not found, or more than one found"
+		info=$(getinfo $uuid)
+		status=$(getkey "$info" vrde)
+		test "$status" = "on" || die "Virtual Remote Desktop not enabled"
+		port=$(getport "$info" vrdeports) || die "RDP port not found, strange"
+		echo Connecting to $(getkey "$info" name) via RDP
+		rdesktop -g 100% -f -K -N localhost:$port
+	;;
+	vnc)
+		uuid=$(resolve_uuid "$regexp") || die "UUID not found, or more than one found"
+		info=$(getinfo $uuid)
+		nic=$(getkey "$info" nic1)
+		case "$nic" in
+			bridged)
+				port="5901"
+				host=$(gethostip $uuid)
+				;;
+			nat)
+				port=$(getport "$info" 5900) || die "VNC port mapping not found"
+				host="localhost"
+				;;
+			*)
+				die "Unknown network interface, or not found"
+				;;
+		esac
+		echo Connecting to $(getkey "$info" name) via VNC
+		vncviewer $host:$port
+	;;
+	*)
+		echo
+		echo 'vbox, a human friendly interface to VBoxManage'
+		echo
+		echo 'Usage: '`basename $0`' <command> [<regexp>] [<options>]'
+		echo
+		echo 'Where command can be:'
+		echo
+		echo '     list   List the vms defined in VirtualBox'
+		echo '     info   Get useful info from a virtual machine'
+		echo '    start   Start the virtual machine'
+		echo '     stop   Stop the virtual machine via ACPI'
+		echo '     kill   Stop the virtual machine by shutdown (be careful)'
+		echo '   rename   Rename a virtual machine, provide the new name as option'
+		echo '      ssh   Connect by ssh to the machine, provide also an user name'
+		echo '      rdp   Connect by rdp, if it is allowed in the Display tab'
+		echo '      vnc   Connect via VNC to the machine, if it is installed in the guest'
+		echo
+		echo The regexp will try to match the machine screen names, and will
+		echo only succeed if only one unambiguous match is found. You can
+		echo check the regular expression previously by using the list command.
+		echo An empty regexp will match all the machines.
+		echo
+esac
+
