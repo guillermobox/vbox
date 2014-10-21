@@ -1,5 +1,7 @@
 #!/bin/sh
 #
+# vbox, Copyright (C) 2014 Guillermo Indalecio <guillermobox@gmail.com>
+#
 # Script to control virtualbox machines
 #
 # Allows to manage and connect to machines, shortcutting the
