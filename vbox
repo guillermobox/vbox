@@ -14,7 +14,7 @@ errormsg=""
 
 die () {
 	msg=${1:-$errormsg}
-	echo "\033[31mvbox: $msg\033[0m" 1>&2
+	echo -e "\033[31mvbox: $msg\033[0m" 1>&2
 	exit 1
 }
 
